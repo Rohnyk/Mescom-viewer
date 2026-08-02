@@ -212,6 +212,37 @@ function getChartColors() {
   };
 }
 
+// Expanded vibrant color palette with dynamic HSL fallback for unlimited unique colors
+const BASE_PALETTE = [
+  { border: "#6366f1", bg: "rgba(99,102,241,0.15)" },  // Indigo
+  { border: "#10b981", bg: "rgba(16,185,129,0.15)" },  // Emerald
+  { border: "#f59e0b", bg: "rgba(245,158,11,0.15)" },  // Amber
+  { border: "#ef4444", bg: "rgba(239,68,68,0.15)" },   // Red
+  { border: "#8b5cf6", bg: "rgba(139,92,246,0.15)" },  // Purple
+  { border: "#06b6d4", bg: "rgba(6,182,212,0.15)" },   // Cyan
+  { border: "#ec4899", bg: "rgba(236,72,153,0.15)" },  // Pink
+  { border: "#84cc16", bg: "rgba(132,204,22,0.15)" },  // Lime
+  { border: "#f97316", bg: "rgba(249,115,22,0.15)" },  // Orange
+  { border: "#14b8a6", bg: "rgba(20,184,166,0.15)" },  // Teal
+  { border: "#a855f7", bg: "rgba(168,85,247,0.15)" },  // Violet
+  { border: "#3b82f6", bg: "rgba(59,130,246,0.15)" },  // Blue
+  { border: "#eab308", bg: "rgba(234,179,8,0.15)" },   // Yellow
+  { border: "#d946ef", bg: "rgba(217,70,239,0.15)" },  // Fuchsia
+  { border: "#00d2ff", bg: "rgba(0,210,255,0.15)" },   // Electric Cyan
+  { border: "#ff5722", bg: "rgba(255,87,34,0.15)" },   // Deep Orange
+];
+
+function getAccountColor(index) {
+  if (index < BASE_PALETTE.length) {
+    return BASE_PALETTE[index];
+  }
+  // Golden ratio hue angle offset for distinct non-repeating colors
+  const hue = (index * 137.508) % 360;
+  const border = `hsl(${Math.round(hue)}, 75%, 60%)`;
+  const bg = `hsla(${Math.round(hue)}, 75%, 60%, 0.15)`;
+  return { border, bg };
+}
+
 function renderConsumptionChart(accountFilter = "all") {
   const ctx = document.getElementById("chart-consumption").getContext("2d");
   const colors = getChartColors();
@@ -230,20 +261,12 @@ function renderConsumptionChart(accountFilter = "all") {
   });
   const months = [...monthSet].sort();
 
-  const palette = [
-    { border: "#6366f1", bg: "rgba(99,102,241,0.15)" },
-    { border: "#34d399", bg: "rgba(52,211,153,0.15)" },
-    { border: "#fbbf24", bg: "rgba(251,191,36,0.15)" },
-    { border: "#f87171", bg: "rgba(248,113,113,0.15)" },
-    { border: "#a78bfa", bg: "rgba(167,139,250,0.15)" },
-  ];
-
   const datasets = accounts.map((acc, idx) => {
     const data = months.map(m => {
       const histItem = acc.history ? acc.history.find(h => h.billMonth === m) : null;
       return histItem ? histItem.units : null;
     });
-    const c = palette[idx % palette.length];
+    const c = getAccountColor(idx);
     return {
       label: acc.name,
       data,
@@ -295,7 +318,7 @@ function renderCostChart() {
     return acc.history.reduce((s, h) => s + h.amount, 0);
   });
 
-  const palette = ["#6366f1", "#34d399", "#fbbf24", "#f87171", "#a78bfa"];
+  const bgColors = accounts.map((_, idx) => getAccountColor(idx).border);
 
   if (costChart) costChart.destroy();
 
@@ -305,7 +328,7 @@ function renderCostChart() {
       labels: accounts.map(acc => acc.name),
       datasets: [{
         data,
-        backgroundColor: palette.slice(0, accounts.length),
+        backgroundColor: bgColors,
         borderWidth: 0,
         hoverOffset: 12,
       }],
