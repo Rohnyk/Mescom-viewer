@@ -8,11 +8,33 @@ A modern, responsive web application for managing, tracking, and live-fetching *
 
 - **⚡ Live Bill Fetching & Automation**: Automatically fetches live bill data directly from the MESCOM portal using headless browser integration (Puppeteer).
 - **🏠 Property Profile Management**: Group multiple accounts under custom property profiles (e.g., *My Home*, *Rental Properties*, *Family*, *Commercial*).
+- **📝 Notion Database Integration**: Auto-lookup consumer/tenant names from your Notion Database by Room Number (with fallback to existing name).
 - **📊 Consumption & Financial Analytics**: Visual charts for monthly power consumption (kWh) and bill amount trends.
 - **🏷️ Status Filtering & Badges**: One-click filtering by bill status (**All**, **Paid**, **Unpaid**, **Overdue**).
 - **🔒 Custom Consumer Name Protection**: User-customized consumer names and room numbers are preserved across live refetches.
 - **✅ Zero/Negative Bill Handling**: Automatically categorizes zero or negative balances as **Paid**.
 - **🐳 Docker & Docker Compose Ready**: Easily containerized with persistent volume support for bill databases.
+
+---
+
+## 📝 Notion Database Integration Setup (Optional)
+
+You can automatically sync tenant consumer names from a **Notion Database** using Room Numbers! If a room is not found in Notion, your existing consumer name is safely persisted.
+
+### Setup Instructions:
+1. Create an Integration in [Notion Developers Portal](https://www.notion.so/my-integrations) and copy the **Internal Integration Secret**.
+2. Share your Notion Database with the integration.
+3. Add the environment variables to your `docker-compose.yml`:
+
+```yaml
+    environment:
+      - NOTION_API_KEY=secret_your_notion_integration_token
+      - NOTION_DATABASE_ID=your_notion_database_id
+      - NOTION_ROOM_FIELD=Room No        # Optional (default: Room No)
+      - NOTION_NAME_FIELD=Consumer Name   # Optional (default: Consumer Name)
+```
+
+In the dashboard, click **"📝 Sync Notion"** next to the Room No. input in the Edit Account modal to perform an instant lookup!
 
 ---
 

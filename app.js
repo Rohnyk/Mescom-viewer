@@ -848,6 +848,47 @@ function closeBillForm() {
   document.getElementById("bill-form-overlay").classList.remove("open");
 }
 
+async function syncNameFromNotion() {
+  const roomNoInput = document.getElementById("bf-room");
+  const roomNo = roomNoInput ? roomNoInput.value.trim() : "";
+
+  if (!roomNo) {
+    alert("Please enter a Room Number first.");
+    if (roomNoInput) roomNoInput.focus();
+    return;
+  }
+
+  const syncBtn = document.querySelector(".btn-notion-sync");
+  if (syncBtn) syncBtn.textContent = "⏳ Looking up...";
+
+  try {
+    const res = await fetch('/api/notion/lookup-room', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomNo })
+    });
+
+    const data = await res.json();
+
+    if (!data.configured) {
+      alert("Notion integration is not configured.\n\nTo enable it, set environment variables in your docker-compose.yml:\n- NOTION_API_KEY\n- NOTION_DATABASE_ID");
+      return;
+    }
+
+    if (data.success && data.consumerName) {
+      document.getElementById("bf-name").value = data.consumerName;
+      alert(`Found Tenant in Notion: "${data.consumerName}" for Room ${roomNo}`);
+    } else {
+      alert(`No tenant found in Notion for Room ${roomNo}.\n\nExisting consumer name will be persisted.`);
+    }
+  } catch (err) {
+    console.error("Notion lookup error:", err);
+    alert("Failed to query Notion API: " + err.message);
+  } finally {
+    if (syncBtn) syncBtn.textContent = "📝 Sync Notion";
+  }
+}
+
 async function saveBill(e) {
   e.preventDefault();
 

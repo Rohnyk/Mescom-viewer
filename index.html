@@ -275,7 +275,12 @@
               </select>
             </div>
             <div class="bf-field">
-              <label for="bf-room">Room No.</label>
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label for="bf-room" style="margin-bottom: 0;">Room No.</label>
+                <button type="button" class="btn-notion-sync" onclick="syncNameFromNotion()" style="font-size: 0.72rem; padding: 2px 8px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-muted); cursor: pointer;" title="Lookup tenant name from Notion by room number">
+                  📝 Sync Notion
+                </button>
+              </div>
               <input type="text" id="bf-room" class="form-input" placeholder="e.g. 101" />
             </div>
             <div class="bf-field">

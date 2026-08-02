@@ -204,7 +204,111 @@ function saveBillsDatabase(accounts) {
 
 let scraperSessions = {}; // Store active browser/page sessions
 
+// --- Notion Integration: Room No -> Consumer Name Lookup ---
+async function lookupNotionConsumerName(roomNo) {
+  const notionKey = process.env.NOTION_API_KEY;
+  const databaseId = process.env.NOTION_DATABASE_ID;
+  const roomField = process.env.NOTION_ROOM_FIELD || 'Room No';
+  const nameField = process.env.NOTION_NAME_FIELD || 'Consumer Name';
+
+  if (!notionKey || !databaseId || !roomNo) {
+    return null;
+  }
+
+  const cleanRoom = roomNo.toString().trim();
+  try {
+    logInfo('NOTION', `Querying Notion database for room: ${cleanRoom}`, { databaseId });
+
+    // Helper to query Notion database with specific filter type
+    const searchNotion = async (filterType) => {
+      const res = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${notionKey}`,
+          'Notion-Version': '2022-06-28',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          filter: {
+            property: roomField,
+            [filterType]: {
+              equals: cleanRoom
+            }
+          }
+        })
+      });
+      if (!res.ok) return null;
+      return await res.json();
+    };
+
+    // Try title, rich_text, and select filters in sequence
+    let data = await searchNotion('title');
+    if (!data || !data.results || data.results.length === 0) {
+      data = await searchNotion('rich_text');
+    }
+    if (!data || !data.results || data.results.length === 0) {
+      data = await searchNotion('select');
+    }
+
+    if (data && data.results && data.results.length > 0) {
+      const page = data.results[0];
+      const props = page.properties;
+      
+      // Look for specified name property or fallbacks
+      const nameProp = props[nameField] || props['Name'] || props['Tenant'] || props['Consumer Name'];
+      if (nameProp) {
+        let extractedName = null;
+        if (nameProp.type === 'title' && nameProp.title && nameProp.title.length > 0) {
+          extractedName = nameProp.title.map(t => t.plain_text).join('').trim();
+        } else if (nameProp.type === 'rich_text' && nameProp.rich_text && nameProp.rich_text.length > 0) {
+          extractedName = nameProp.rich_text.map(t => t.plain_text).join('').trim();
+        } else if (nameProp.type === 'select' && nameProp.select) {
+          extractedName = nameProp.select.name.trim();
+        }
+
+        if (extractedName) {
+          logInfo('NOTION', `Found matching Notion tenant for room ${cleanRoom}`, { consumerName: extractedName });
+          return extractedName;
+        }
+      }
+    }
+
+    logInfo('NOTION', `No Notion tenant found for room ${cleanRoom}`);
+    return null;
+  } catch (err) {
+    logError('NOTION', `Error querying Notion for room ${cleanRoom}`, err);
+    return null;
+  }
+}
+
 // --- API Endpoints ---
+
+// Notion Lookup Endpoint
+app.post('/api/notion/lookup-room', async (req, res) => {
+  const { roomNo } = req.body;
+  if (!roomNo) {
+    return res.status(400).json({ error: 'Room number is required' });
+  }
+
+  const isConfigured = !!(process.env.NOTION_API_KEY && process.env.NOTION_DATABASE_ID);
+  if (!isConfigured) {
+    logWarn('NOTION', 'Lookup requested but NOTION_API_KEY or NOTION_DATABASE_ID is not configured');
+    return res.json({
+      success: false,
+      configured: false,
+      message: 'Notion integration is not configured. Set NOTION_API_KEY and NOTION_DATABASE_ID.',
+      consumerName: null
+    });
+  }
+
+  const consumerName = await lookupNotionConsumerName(roomNo);
+  res.json({
+    success: true,
+    configured: true,
+    roomNo,
+    consumerName: consumerName || null
+  });
+});
 
 // 1. Get all accounts
 app.get('/api/bills', (req, res) => {
@@ -337,7 +441,7 @@ app.delete('/api/bills/:id/history', (req, res) => {
 });
 
 // 5. Save/Insert a scraped or synced bill into an account's history
-app.post('/api/bills/save-sync', (req, res) => {
+app.post('/api/bills/save-sync', async (req, res) => {
   const { account, name, billMonth, units, amount, dueDate, status } = req.body;
   const accounts = loadBillsDatabase();
 
@@ -371,6 +475,15 @@ app.post('/api/bills/save-sync', (req, res) => {
   const isPlaceholder = !acc.name || acc.name.startsWith('Consumer ') || acc.name === 'N/A';
   if (name && name !== 'N/A' && isPlaceholder) {
     acc.name = name;
+  }
+
+  // If room number is assigned and name is still a placeholder, query Notion DB
+  if (acc.roomNo && (isPlaceholder || acc.name === 'N/A')) {
+    const notionName = await lookupNotionConsumerName(acc.roomNo);
+    if (notionName) {
+      acc.name = notionName;
+      logInfo('NOTION', `Auto-applied Notion consumer name for room ${acc.roomNo}`, { consumerName: notionName });
+    }
   }
 
   const resolvedStatus = (parseInt(amount, 10) <= 0) ? "paid" : (status || "unpaid");

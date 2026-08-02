@@ -11,6 +11,11 @@ services:
       - NODE_ENV=production
       - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+      # --- Optional Notion API Tenant Name Sync ---
+      # - NOTION_API_KEY=secret_your_integration_token_here
+      # - NOTION_DATABASE_ID=your_notion_database_id_here
+      # - NOTION_ROOM_FIELD=Room No
+      # - NOTION_NAME_FIELD=Consumer Name
 
 volumes:
   mescom-data:
