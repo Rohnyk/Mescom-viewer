@@ -217,69 +217,120 @@ async function lookupNotionRoomDetails(roomNo) {
   }
 
   const cleanRoom = roomNo.toString().trim();
-  try {
-    logInfo('NOTION', `Querying Notion database for room: ${cleanRoom}`, { databaseId });
+  const normalizedRoom = cleanRoom.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-    // Helper to query Notion database with specific filter type
-    const searchNotion = async (filterType) => {
-      const res = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
+  try {
+    logInfo('NOTION', `Querying Notion database for room: ${cleanRoom}`, { databaseId, roomField, nameField, meterField });
+
+    // Helper to extract plain text string from any Notion property type
+    const extractPropValue = (propObj) => {
+      if (!propObj) return null;
+      if (propObj.type === 'title' && propObj.title && propObj.title.length > 0) {
+        return propObj.title.map(t => t.plain_text).join('').trim();
+      }
+      if (propObj.type === 'rich_text' && propObj.rich_text && propObj.rich_text.length > 0) {
+        return propObj.rich_text.map(t => t.plain_text).join('').trim();
+      }
+      if (propObj.type === 'select' && propObj.select) {
+        return propObj.select.name.trim();
+      }
+      if (propObj.type === 'number' && propObj.number !== null) {
+        return propObj.number.toString();
+      }
+      if (propObj.type === 'phone_number' && propObj.phone_number) {
+        return propObj.phone_number.trim();
+      }
+      return null;
+    };
+
+    // Strategy 1: Targeted Filter Queries
+    const searchFiltered = async (filterType, operator = 'equals') => {
+      try {
+        const res = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${notionKey}`,
+            'Notion-Version': '2022-06-28',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            filter: {
+              property: roomField,
+              [filterType]: {
+                [operator]: cleanRoom
+              }
+            }
+          })
+        });
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (e) { return null; }
+    };
+
+    let data = await searchFiltered('title', 'equals');
+    if (!data || !data.results || data.results.length === 0) data = await searchFiltered('title', 'contains');
+    if (!data || !data.results || data.results.length === 0) data = await searchFiltered('rich_text', 'equals');
+    if (!data || !data.results || data.results.length === 0) data = await searchFiltered('rich_text', 'contains');
+    if (!data || !data.results || data.results.length === 0) data = await searchFiltered('select', 'equals');
+
+    let matchingPage = (data && data.results && data.results.length > 0) ? data.results[0] : null;
+
+    // Strategy 2: Database Scan Fallback (scans all pages in Notion DB if targeted query yields 0 results)
+    if (!matchingPage) {
+      logInfo('NOTION', `Targeted filter produced 0 results. Running database scan for room ${cleanRoom}...`);
+      const allRes = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${notionKey}`,
           'Notion-Version': '2022-06-28',
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          filter: {
-            property: roomField,
-            [filterType]: {
-              equals: cleanRoom
-            }
-          }
-        })
+        body: JSON.stringify({ page_size: 100 })
       });
-      if (!res.ok) return null;
-      return await res.json();
-    };
 
-    // Try title, rich_text, and select filters in sequence
-    let data = await searchNotion('title');
-    if (!data || !data.results || data.results.length === 0) {
-      data = await searchNotion('rich_text');
-    }
-    if (!data || !data.results || data.results.length === 0) {
-      data = await searchNotion('select');
+      if (allRes.ok) {
+        const allData = await allRes.json();
+        if (allData && allData.results) {
+          logInfo('NOTION', `Fetched ${allData.results.length} pages from Notion database for scanning.`);
+          for (const page of allData.results) {
+            const props = page.properties;
+            for (const key of Object.keys(props)) {
+              const val = extractPropValue(props[key]);
+              if (val) {
+                const normVal = val.toLowerCase().replace(/[^a-z0-9]/g, '');
+                if (normVal === normalizedRoom || val.trim().toLowerCase() === cleanRoom.toLowerCase()) {
+                  matchingPage = page;
+                  logInfo('NOTION', `Database scan matched room ${cleanRoom} on property "${key}": "${val}"`);
+                  break;
+                }
+              }
+            }
+            if (matchingPage) break;
+          }
+        }
+      }
     }
 
-    if (data && data.results && data.results.length > 0) {
-      const page = data.results[0];
-      const props = page.properties;
+    if (matchingPage) {
+      const props = matchingPage.properties;
       
-      // Helper to extract plain text string from any Notion property type
-      const extractPropValue = (propObj) => {
-        if (!propObj) return null;
-        if (propObj.type === 'title' && propObj.title && propObj.title.length > 0) {
-          return propObj.title.map(t => t.plain_text).join('').trim();
-        }
-        if (propObj.type === 'rich_text' && propObj.rich_text && propObj.rich_text.length > 0) {
-          return propObj.rich_text.map(t => t.plain_text).join('').trim();
-        }
-        if (propObj.type === 'select' && propObj.select) {
-          return propObj.select.name.trim();
-        }
-        if (propObj.type === 'number' && propObj.number !== null) {
-          return propObj.number.toString();
+      // Helper to find property value flexibly by key or fallback aliases
+      const findPropValue = (configuredKey, fallbackKeys) => {
+        if (props[configuredKey]) return extractPropValue(props[configuredKey]);
+        const propKeys = Object.keys(props);
+        const ciKey = propKeys.find(k => k.toLowerCase() === configuredKey.toLowerCase());
+        if (ciKey) return extractPropValue(props[ciKey]);
+        for (const fb of fallbackKeys) {
+          const fbKey = propKeys.find(k => k.toLowerCase().includes(fb.toLowerCase()));
+          if (fbKey) return extractPropValue(props[fbKey]);
         }
         return null;
       };
 
-      const nameProp = props[nameField] || props['Name'] || props['Tenant'] || props['Consumer Name'];
-      const meterProp = props[meterField] || props['Meter ID'] || props['Meter No'] || props['Meter'];
+      const consumerName = findPropValue(nameField, ['tenent', 'tenant', 'name', 'consumer']);
+      const meterNo = findPropValue(meterField, ['meter', 'electricity', 'number']);
 
-      const consumerName = extractPropValue(nameProp);
-      const meterNo = extractPropValue(meterProp);
-
-      logInfo('NOTION', `Found Notion record for room ${cleanRoom}`, { consumerName, meterNo });
+      logInfo('NOTION', `Found Notion details for room ${cleanRoom}`, { consumerName, meterNo });
       return { consumerName, meterNo };
     }
 
