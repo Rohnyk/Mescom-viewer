@@ -861,21 +861,29 @@ async function syncNameFromNotion() {
   const syncBtn = document.querySelector(".btn-notion-sync");
   if (syncBtn) syncBtn.textContent = "⏳ Looking up...";
 
+  const accountNoInput = document.getElementById("bf-account");
+  const accountNo = accountNoInput ? accountNoInput.value.trim() : "";
+
   try {
     const res = await fetch('/api/notion/lookup-room', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomNo })
+      body: JSON.stringify({ roomNo, accountNo })
     });
 
     const data = await res.json();
 
     if (!data.configured) {
-      alert("Notion integration is not configured.\n\nTo enable it, set environment variables in your docker-compose.yml:\n- NOTION_API_KEY\n- NOTION_DATABASE_ID");
+      alert("Notion integration is not configured.\n\nTo enable it, set environment variables in your .env:\n- NOTION_API_KEY\n- NOTION_DATABASE_ID");
       return;
     }
 
-    if (data.success && (data.consumerName || data.meterNo)) {
+    if (data.notionError) {
+      alert(`⚠️ Notion Access Error:\n\n${data.notionError}`);
+      return;
+    }
+
+    if (data.success && (data.consumerName || data.meterNo || data.customerId)) {
       let msg = `Found Notion details for Room ${roomNo}:`;
       if (data.consumerName) {
         document.getElementById("bf-name").value = data.consumerName;
@@ -884,6 +892,14 @@ async function syncNameFromNotion() {
       if (data.meterNo) {
         document.getElementById("bf-meter").value = data.meterNo;
         msg += `\n• Meter ID: "${data.meterNo}"`;
+      }
+      if (data.customerId) {
+        msg += `\n• Electricity Customer ID: "${data.customerId}"`;
+        if (data.accountMatch === false) {
+          msg += `\n\n⚠️ WARNING: Notion Customer ID (${data.customerId}) does NOT match this account (${accountNo})!`;
+        } else {
+          msg += ` (✅ Matches Account)`;
+        }
       }
       alert(msg);
     } else {

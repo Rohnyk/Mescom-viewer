@@ -205,22 +205,47 @@ function saveBillsDatabase(accounts) {
 let scraperSessions = {}; // Store active browser/page sessions
 
 // --- Notion Integration: Room No -> Consumer Name & Meter ID Lookup ---
-async function lookupNotionRoomDetails(roomNo) {
+async function lookupNotionRoomDetails(roomNo, accountNo = null) {
   const notionKey = process.env.NOTION_API_KEY;
   const databaseId = process.env.NOTION_DATABASE_ID;
-  const roomField = process.env.NOTION_ROOM_FIELD || 'Room No';
-  const nameField = process.env.NOTION_NAME_FIELD || 'Consumer Name';
-  const meterField = process.env.NOTION_METER_FIELD || 'Meter ID';
+  const roomField = process.env.NOTION_ROOM_FIELD || 'Room#';
+  const nameField = process.env.NOTION_NAME_FIELD || 'Tenent Name';
+  const meterField = process.env.NOTION_METER_FIELD || 'Electricity Meter Number';
+  const accountField = process.env.NOTION_ACCOUNT_FIELD || 'Electricity Customer ID';
 
-  if (!notionKey || !databaseId || !roomNo) {
-    return { consumerName: null, meterNo: null };
+  if (!notionKey || !databaseId || (!roomNo && !accountNo)) {
+    return { consumerName: null, meterNo: null, customerId: null, accountMatch: true };
   }
 
-  const cleanRoom = roomNo.toString().trim();
+  const cleanRoom = roomNo ? roomNo.toString().trim() : '';
   const normalizedRoom = cleanRoom.toLowerCase().replace(/[^a-z0-9]/g, '');
 
   try {
-    logInfo('NOTION', `Querying Notion database for room: ${cleanRoom}`, { databaseId, roomField, nameField, meterField });
+    logInfo('NOTION', `Querying Notion database for room: ${cleanRoom || accountNo}`, { databaseId, roomField, nameField, meterField, accountField });
+
+    // Pre-flight check database access & connection permission
+    const connCheck = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${notionKey}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ page_size: 1 })
+    });
+
+    if (!connCheck.ok) {
+      const errJson = await connCheck.json().catch(() => ({}));
+      let notionError = null;
+      if (connCheck.status === 404 || errJson.code === 'object_not_found') {
+        notionError = `Database is not shared with your Notion Integration.\n\nTo fix:\n1. Open your Notion database in browser\n2. Click the '...' menu (top right)\n3. Click 'Add connections' (or 'Connections')\n4. Search for & select your integration.`;
+        logWarn('NOTION', `Notion Database ${databaseId} not shared with integration (HTTP 404 object_not_found)`);
+      } else {
+        notionError = `Notion API Error (${connCheck.status}): ${errJson.message || 'Access failed'}`;
+        logWarn('NOTION', `Notion API error (HTTP ${connCheck.status})`, errJson);
+      }
+      return { consumerName: null, meterNo: null, customerId: null, accountMatch: true, notionError };
+    }
 
     // Helper to extract plain text string from any Notion property type
     const extractPropValue = (propObj) => {
@@ -234,7 +259,7 @@ async function lookupNotionRoomDetails(roomNo) {
       if (propObj.type === 'select' && propObj.select) {
         return propObj.select.name.trim();
       }
-      if (propObj.type === 'number' && propObj.number !== null) {
+      if (propObj.type === 'number' && propObj.number !== null && propObj.number !== undefined) {
         return propObj.number.toString();
       }
       if (propObj.type === 'phone_number' && propObj.phone_number) {
@@ -267,17 +292,15 @@ async function lookupNotionRoomDetails(roomNo) {
       } catch (e) { return null; }
     };
 
-    let data = await searchFiltered('title', 'equals');
-    if (!data || !data.results || data.results.length === 0) data = await searchFiltered('title', 'contains');
-    if (!data || !data.results || data.results.length === 0) data = await searchFiltered('rich_text', 'equals');
-    if (!data || !data.results || data.results.length === 0) data = await searchFiltered('rich_text', 'contains');
-    if (!data || !data.results || data.results.length === 0) data = await searchFiltered('select', 'equals');
+    let data = cleanRoom ? await searchFiltered('title', 'equals') : null;
+    if (!data || !data.results || data.results.length === 0) data = cleanRoom ? await searchFiltered('title', 'contains') : null;
+    if (!data || !data.results || data.results.length === 0) data = cleanRoom ? await searchFiltered('rich_text', 'equals') : null;
 
     let matchingPage = (data && data.results && data.results.length > 0) ? data.results[0] : null;
 
     // Strategy 2: Database Scan Fallback (scans all pages in Notion DB if targeted query yields 0 results)
     if (!matchingPage) {
-      logInfo('NOTION', `Targeted filter produced 0 results. Running database scan for room ${cleanRoom}...`);
+      logInfo('NOTION', `Targeted filter produced 0 results. Running database scan...`);
       const allRes = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
         method: 'POST',
         headers: {
@@ -298,7 +321,7 @@ async function lookupNotionRoomDetails(roomNo) {
               const val = extractPropValue(props[key]);
               if (val) {
                 const normVal = val.toLowerCase().replace(/[^a-z0-9]/g, '');
-                if (normVal === normalizedRoom || val.trim().toLowerCase() === cleanRoom.toLowerCase()) {
+                if (cleanRoom && (normVal === normalizedRoom || val.trim().toLowerCase() === cleanRoom.toLowerCase())) {
                   matchingPage = page;
                   logInfo('NOTION', `Database scan matched room ${cleanRoom} on property "${key}": "${val}"`);
                   break;
@@ -329,16 +352,28 @@ async function lookupNotionRoomDetails(roomNo) {
 
       const consumerName = findPropValue(nameField, ['tenent', 'tenant', 'name', 'consumer']);
       const meterNo = findPropValue(meterField, ['meter', 'electricity', 'number']);
+      const customerId = findPropValue(accountField, ['customer id', 'customer', 'account']);
 
-      logInfo('NOTION', `Found Notion details for room ${cleanRoom}`, { consumerName, meterNo });
-      return { consumerName, meterNo };
+      // Validate accountNo if provided
+      let accountMatch = true;
+      if (accountNo && customerId) {
+        const cleanAcc = accountNo.toString().replace(/^MNG-/, '').trim();
+        const cleanNotionAcc = customerId.toString().replace(/^MNG-/, '').trim();
+        if (cleanAcc && cleanNotionAcc && cleanAcc !== cleanNotionAcc) {
+          accountMatch = false;
+          logWarn('NOTION', `Account mismatch for room ${cleanRoom}: Account is ${cleanAcc}, but Notion has ${cleanNotionAcc}`);
+        }
+      }
+
+      logInfo('NOTION', `Found Notion details for room ${cleanRoom}`, { consumerName, meterNo, customerId, accountMatch });
+      return { consumerName, meterNo, customerId, accountMatch };
     }
 
     logInfo('NOTION', `No Notion record found for room ${cleanRoom}`);
-    return { consumerName: null, meterNo: null };
+    return { consumerName: null, meterNo: null, customerId: null, accountMatch: true };
   } catch (err) {
     logError('NOTION', `Error querying Notion for room ${cleanRoom}`, err);
-    return { consumerName: null, meterNo: null };
+    return { consumerName: null, meterNo: null, customerId: null, accountMatch: true };
   }
 }
 
@@ -346,9 +381,9 @@ async function lookupNotionRoomDetails(roomNo) {
 
 // Notion Lookup Endpoint
 app.post('/api/notion/lookup-room', async (req, res) => {
-  const { roomNo } = req.body;
-  if (!roomNo) {
-    return res.status(400).json({ error: 'Room number is required' });
+  const { roomNo, accountNo } = req.body;
+  if (!roomNo && !accountNo) {
+    return res.status(400).json({ error: 'Room number or Account number is required' });
   }
 
   const isConfigured = !!(process.env.NOTION_API_KEY && process.env.NOTION_DATABASE_ID);
@@ -359,17 +394,22 @@ app.post('/api/notion/lookup-room', async (req, res) => {
       configured: false,
       message: 'Notion integration is not configured. Set NOTION_API_KEY and NOTION_DATABASE_ID.',
       consumerName: null,
-      meterNo: null
+      meterNo: null,
+      customerId: null,
+      accountMatch: true
     });
   }
 
-  const details = await lookupNotionRoomDetails(roomNo);
+  const details = await lookupNotionRoomDetails(roomNo, accountNo);
   res.json({
-    success: true,
+    success: !details.notionError,
     configured: true,
     roomNo,
     consumerName: details.consumerName || null,
-    meterNo: details.meterNo || null
+    meterNo: details.meterNo || null,
+    customerId: details.customerId || null,
+    accountMatch: details.accountMatch !== false,
+    notionError: details.notionError || null
   });
 });
 
