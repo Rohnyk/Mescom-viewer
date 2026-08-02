@@ -5,6 +5,7 @@ node_modules
 Dockerfile
 .dockerignore
 docker-compose.yml
+.env
 nginx.conf
 *.png
 data
