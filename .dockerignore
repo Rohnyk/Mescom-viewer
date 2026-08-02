@@ -1,0 +1,16 @@
+node_modules
+.git
+.gitignore
+*.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+nginx.conf
+*.png
+data
+check_captcha_leak.js
+debug_result_page.js
+inspect.js
+inspect_captcha.js
+test_*.js
+.DS_Store

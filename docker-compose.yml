@@ -1,0 +1,17 @@
+services:
+  mescom-dashboard:
+    build: .
+    container_name: mescom-dashboard
+    ports:
+      - "35000:35000"
+    volumes:
+      - mescom-data:/app/data
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+volumes:
+  mescom-data:
+    driver: local
