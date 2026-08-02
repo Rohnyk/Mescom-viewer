@@ -204,15 +204,16 @@ function saveBillsDatabase(accounts) {
 
 let scraperSessions = {}; // Store active browser/page sessions
 
-// --- Notion Integration: Room No -> Consumer Name Lookup ---
-async function lookupNotionConsumerName(roomNo) {
+// --- Notion Integration: Room No -> Consumer Name & Meter ID Lookup ---
+async function lookupNotionRoomDetails(roomNo) {
   const notionKey = process.env.NOTION_API_KEY;
   const databaseId = process.env.NOTION_DATABASE_ID;
   const roomField = process.env.NOTION_ROOM_FIELD || 'Room No';
   const nameField = process.env.NOTION_NAME_FIELD || 'Consumer Name';
+  const meterField = process.env.NOTION_METER_FIELD || 'Meter ID';
 
   if (!notionKey || !databaseId || !roomNo) {
-    return null;
+    return { consumerName: null, meterNo: null };
   }
 
   const cleanRoom = roomNo.toString().trim();
@@ -254,30 +255,39 @@ async function lookupNotionConsumerName(roomNo) {
       const page = data.results[0];
       const props = page.properties;
       
-      // Look for specified name property or fallbacks
-      const nameProp = props[nameField] || props['Name'] || props['Tenant'] || props['Consumer Name'];
-      if (nameProp) {
-        let extractedName = null;
-        if (nameProp.type === 'title' && nameProp.title && nameProp.title.length > 0) {
-          extractedName = nameProp.title.map(t => t.plain_text).join('').trim();
-        } else if (nameProp.type === 'rich_text' && nameProp.rich_text && nameProp.rich_text.length > 0) {
-          extractedName = nameProp.rich_text.map(t => t.plain_text).join('').trim();
-        } else if (nameProp.type === 'select' && nameProp.select) {
-          extractedName = nameProp.select.name.trim();
+      // Helper to extract plain text string from any Notion property type
+      const extractPropValue = (propObj) => {
+        if (!propObj) return null;
+        if (propObj.type === 'title' && propObj.title && propObj.title.length > 0) {
+          return propObj.title.map(t => t.plain_text).join('').trim();
         }
+        if (propObj.type === 'rich_text' && propObj.rich_text && propObj.rich_text.length > 0) {
+          return propObj.rich_text.map(t => t.plain_text).join('').trim();
+        }
+        if (propObj.type === 'select' && propObj.select) {
+          return propObj.select.name.trim();
+        }
+        if (propObj.type === 'number' && propObj.number !== null) {
+          return propObj.number.toString();
+        }
+        return null;
+      };
 
-        if (extractedName) {
-          logInfo('NOTION', `Found matching Notion tenant for room ${cleanRoom}`, { consumerName: extractedName });
-          return extractedName;
-        }
-      }
+      const nameProp = props[nameField] || props['Name'] || props['Tenant'] || props['Consumer Name'];
+      const meterProp = props[meterField] || props['Meter ID'] || props['Meter No'] || props['Meter'];
+
+      const consumerName = extractPropValue(nameProp);
+      const meterNo = extractPropValue(meterProp);
+
+      logInfo('NOTION', `Found Notion record for room ${cleanRoom}`, { consumerName, meterNo });
+      return { consumerName, meterNo };
     }
 
-    logInfo('NOTION', `No Notion tenant found for room ${cleanRoom}`);
-    return null;
+    logInfo('NOTION', `No Notion record found for room ${cleanRoom}`);
+    return { consumerName: null, meterNo: null };
   } catch (err) {
     logError('NOTION', `Error querying Notion for room ${cleanRoom}`, err);
-    return null;
+    return { consumerName: null, meterNo: null };
   }
 }
 
@@ -297,16 +307,18 @@ app.post('/api/notion/lookup-room', async (req, res) => {
       success: false,
       configured: false,
       message: 'Notion integration is not configured. Set NOTION_API_KEY and NOTION_DATABASE_ID.',
-      consumerName: null
+      consumerName: null,
+      meterNo: null
     });
   }
 
-  const consumerName = await lookupNotionConsumerName(roomNo);
+  const details = await lookupNotionRoomDetails(roomNo);
   res.json({
     success: true,
     configured: true,
     roomNo,
-    consumerName: consumerName || null
+    consumerName: details.consumerName || null,
+    meterNo: details.meterNo || null
   });
 });
 
@@ -477,12 +489,16 @@ app.post('/api/bills/save-sync', async (req, res) => {
     acc.name = name;
   }
 
-  // If room number is assigned and name is still a placeholder, query Notion DB
-  if (acc.roomNo && (isPlaceholder || acc.name === 'N/A')) {
-    const notionName = await lookupNotionConsumerName(acc.roomNo);
-    if (notionName) {
-      acc.name = notionName;
-      logInfo('NOTION', `Auto-applied Notion consumer name for room ${acc.roomNo}`, { consumerName: notionName });
+  // If room number is assigned, query Notion DB for Name and Meter ID
+  if (acc.roomNo) {
+    const notionDetails = await lookupNotionRoomDetails(acc.roomNo);
+    if (notionDetails.consumerName && (isPlaceholder || acc.name === 'N/A')) {
+      acc.name = notionDetails.consumerName;
+      logInfo('NOTION', `Auto-applied Notion consumer name for room ${acc.roomNo}`, { consumerName: notionDetails.consumerName });
+    }
+    if (notionDetails.meterNo && (!acc.meterNo || acc.meterNo.startsWith('MPL') || acc.meterNo === 'N/A')) {
+      acc.meterNo = notionDetails.meterNo;
+      logInfo('NOTION', `Auto-applied Notion meter ID for room ${acc.roomNo}`, { meterNo: notionDetails.meterNo });
     }
   }
 

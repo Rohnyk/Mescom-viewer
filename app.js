@@ -875,11 +875,19 @@ async function syncNameFromNotion() {
       return;
     }
 
-    if (data.success && data.consumerName) {
-      document.getElementById("bf-name").value = data.consumerName;
-      alert(`Found Tenant in Notion: "${data.consumerName}" for Room ${roomNo}`);
+    if (data.success && (data.consumerName || data.meterNo)) {
+      let msg = `Found Notion details for Room ${roomNo}:`;
+      if (data.consumerName) {
+        document.getElementById("bf-name").value = data.consumerName;
+        msg += `\n• Tenant Name: "${data.consumerName}"`;
+      }
+      if (data.meterNo) {
+        document.getElementById("bf-meter").value = data.meterNo;
+        msg += `\n• Meter ID: "${data.meterNo}"`;
+      }
+      alert(msg);
     } else {
-      alert(`No tenant found in Notion for Room ${roomNo}.\n\nExisting consumer name will be persisted.`);
+      alert(`No tenant/meter record found in Notion for Room ${roomNo}.\n\nExisting details will be persisted.`);
     }
   } catch (err) {
     console.error("Notion lookup error:", err);
