@@ -913,6 +913,57 @@ async function syncNameFromNotion() {
   }
 }
 
+async function syncAllFromNotion() {
+  const btn = document.getElementById("btn-sync-notion-all");
+  const origContent = btn ? btn.innerHTML : "";
+
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation: spin 1s linear infinite;"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 11-.57-8.38l5.67-5.67"/></svg> Syncing Notion...`;
+  }
+
+  try {
+    const res = await fetch('/api/notion/sync-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const data = await res.json();
+
+    if (!data.configured) {
+      alert("Notion integration is not configured.\n\nSet NOTION_API_KEY and NOTION_DATABASE_ID in your .env file.");
+      return;
+    }
+
+    if (!data.success) {
+      alert(`Notion Sync Error: ${data.message || 'Failed to query Notion Database'}`);
+      return;
+    }
+
+    await loadBillsFromServer();
+    renderProfileTabs();
+    if (activeProfileId !== "all") {
+      renderProfileBanner();
+    }
+    applyFilters();
+    renderCharts();
+
+    if (data.updatedCount > 0) {
+      alert(`✅ Notion Bulk Sync Complete!\n\nSuccessfully updated ${data.updatedCount} accounts out of ${data.totalAccounts} from your Notion Database.`);
+    } else {
+      alert(`ℹ️ Notion Bulk Sync Complete!\n\nAll ${data.totalAccounts} accounts are already up-to-date with your Notion Database.`);
+    }
+  } catch (err) {
+    console.error("Bulk Notion sync failed:", err);
+    alert("Error running Notion Bulk Sync: " + err.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origContent;
+    }
+  }
+}
+
 async function saveBill(e) {
   e.preventDefault();
 

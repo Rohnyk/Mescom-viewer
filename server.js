@@ -413,6 +413,152 @@ app.post('/api/notion/lookup-room', async (req, res) => {
   });
 });
 
+// Notion Bulk Sync Endpoint (Syncs all accounts from Notion Database)
+app.post('/api/notion/sync-all', async (req, res) => {
+  const notionKey = process.env.NOTION_API_KEY;
+  const databaseId = process.env.NOTION_DATABASE_ID;
+  const roomField = process.env.NOTION_ROOM_FIELD || 'Room#';
+  const nameField = process.env.NOTION_NAME_FIELD || 'Tenent Name';
+  const meterField = process.env.NOTION_METER_FIELD || 'Electricity Meter Number';
+  const accountField = process.env.NOTION_ACCOUNT_FIELD || 'Electricity Customer ID';
+
+  if (!notionKey || !databaseId) {
+    return res.json({
+      success: false,
+      configured: false,
+      message: 'Notion integration is not configured. Set NOTION_API_KEY and NOTION_DATABASE_ID in .env.'
+    });
+  }
+
+  logInfo('NOTION', `Starting Bulk Sync from Notion Database ${databaseId}...`);
+
+  try {
+    const notionRes = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${notionKey}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ page_size: 100 })
+    });
+
+    if (!notionRes.ok) {
+      const errJson = await notionRes.json().catch(() => ({}));
+      return res.json({
+        success: false,
+        configured: true,
+        message: errJson.message || `Notion API Error ${notionRes.status}`
+      });
+    }
+
+    const notionData = await notionRes.json();
+    const pages = notionData.results || [];
+    logInfo('NOTION', `Fetched ${pages.length} records from Notion for Bulk Sync`);
+
+    const extractPropValue = (propObj) => {
+      if (!propObj) return null;
+      if (propObj.type === 'title' && propObj.title && propObj.title.length > 0) {
+        return propObj.title.map(t => t.plain_text).join('').trim();
+      }
+      if (propObj.type === 'rich_text' && propObj.rich_text && propObj.rich_text.length > 0) {
+        return propObj.rich_text.map(t => t.plain_text).join('').trim();
+      }
+      if (propObj.type === 'select' && propObj.select) {
+        return propObj.select.name.trim();
+      }
+      if (propObj.type === 'number' && propObj.number !== null && propObj.number !== undefined) {
+        return propObj.number.toString();
+      }
+      if (propObj.type === 'phone_number' && propObj.phone_number) {
+        return propObj.phone_number.trim();
+      }
+      return null;
+    };
+
+    const findPropValue = (props, configuredKey, fallbackKeys) => {
+      if (props[configuredKey]) return extractPropValue(props[configuredKey]);
+      const propKeys = Object.keys(props);
+      const ciKey = propKeys.find(k => k.toLowerCase() === configuredKey.toLowerCase());
+      if (ciKey) return extractPropValue(props[ciKey]);
+      for (const fb of fallbackKeys) {
+        const fbKey = propKeys.find(k => k.toLowerCase().includes(fb.toLowerCase()));
+        if (fbKey) return extractPropValue(props[fbKey]);
+      }
+      return null;
+    };
+
+    const notionRecords = pages.map(page => {
+      const props = page.properties;
+      const room = findPropValue(props, roomField, ['room', 'room#']);
+      const name = findPropValue(props, nameField, ['tenent', 'tenant', 'name', 'consumer']);
+      const meter = findPropValue(props, meterField, ['meter', 'electricity', 'number']);
+      const custId = findPropValue(props, accountField, ['customer id', 'customer', 'account']);
+      return { room, name, meter, custId };
+    });
+
+    const accounts = loadBillsDatabase();
+    let updatedCount = 0;
+    const updateSummary = [];
+
+    accounts.forEach(acc => {
+      const cleanAcc = acc.account.replace(/^MNG-/, '').trim();
+      const cleanRoom = acc.roomNo ? acc.roomNo.trim().toLowerCase() : '';
+
+      // Match by Customer ID or Room Number
+      const match = notionRecords.find(nr => {
+        if (nr.custId) {
+          const cleanNotionCustId = nr.custId.replace(/^MNG-/, '').trim();
+          if (cleanNotionCustId === cleanAcc) return true;
+        }
+        if (cleanRoom && nr.room) {
+          const cleanNotionRoom = nr.room.trim().toLowerCase();
+          if (cleanNotionRoom === cleanRoom) return true;
+        }
+        return false;
+      });
+
+      if (match) {
+        let changed = false;
+        if (match.name && acc.name !== match.name) {
+          acc.name = match.name;
+          changed = true;
+        }
+        if (match.meter && acc.meterNo !== match.meter) {
+          acc.meterNo = match.meter;
+          changed = true;
+        }
+        if (match.room && (!acc.roomNo || acc.roomNo !== match.room)) {
+          acc.roomNo = match.room;
+          changed = true;
+        }
+
+        if (changed) {
+          updatedCount++;
+          updateSummary.push({ account: acc.account, room: acc.roomNo, name: acc.name, meter: acc.meterNo });
+        }
+      }
+    });
+
+    if (updatedCount > 0) {
+      saveBillsDatabase(accounts);
+      logInfo('NOTION', `Bulk Sync updated ${updatedCount} accounts`, { updateSummary });
+    }
+
+    res.json({
+      success: true,
+      configured: true,
+      updatedCount,
+      totalAccounts: accounts.length,
+      notionRecordsCount: notionRecords.length,
+      updateSummary
+    });
+  } catch (err) {
+    logError('NOTION', 'Error running Notion Bulk Sync', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // 1. Get all accounts
 app.get('/api/bills', (req, res) => {
   const accounts = loadBillsDatabase();
