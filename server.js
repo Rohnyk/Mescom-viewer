@@ -9,6 +9,35 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// --- Structured Logger for Docker / Production Logs ---
+function logInfo(tag, message, meta = null) {
+  const timestamp = new Date().toISOString();
+  const metaStr = meta ? ` | ${JSON.stringify(meta)}` : '';
+  console.log(`[${timestamp}] [INFO] [${tag}] ${message}${metaStr}`);
+}
+
+function logWarn(tag, message, meta = null) {
+  const timestamp = new Date().toISOString();
+  const metaStr = meta ? ` | ${JSON.stringify(meta)}` : '';
+  console.warn(`[${timestamp}] [WARN] [${tag}] ${message}${metaStr}`);
+}
+
+function logError(tag, message, error = null) {
+  const timestamp = new Date().toISOString();
+  const errDetails = error ? (error.stack || error.message || String(error)) : '';
+  console.error(`[${timestamp}] [ERROR] [${tag}] ${message} ${errDetails}`);
+}
+
+// HTTP Request logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    logInfo('HTTP', `${req.method} ${req.originalUrl} -> ${res.statusCode} (${duration}ms)`);
+  });
+  next();
+});
+
 // Serve static frontend files from this directory
 app.use(express.static(__dirname));
 
@@ -95,34 +124,56 @@ const MAX_HISTORY = 12;
 function loadBillsDatabase() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
+    logInfo('DB', `Created data directory at ${DATA_DIR}`);
   }
 
   if (fs.existsSync(JSON_DB_FILE)) {
     try {
-      return JSON.parse(fs.readFileSync(JSON_DB_FILE, 'utf8'));
+      const data = JSON.parse(fs.readFileSync(JSON_DB_FILE, 'utf8'));
+      logInfo('DB', `Loaded bills database from ${JSON_DB_FILE}`, { accountCount: data.length });
+      return data;
     } catch (e) {
-      console.error("Failed to parse JSON DB, falling back to seeds:", e);
+      logError('DB', `Failed to parse JSON DB at ${JSON_DB_FILE}, falling back to seeds`, e);
     }
   }
 
   // If no DB exists, initialize it with seed data
+  logInfo('DB', 'No existing database found, initializing with seed data', { accountCount: SEED_ACCOUNTS.length });
   saveBillsDatabase(SEED_ACCOUNTS);
   return JSON.parse(JSON.stringify(SEED_ACCOUNTS));
 }
 
 function saveBillsDatabase(accounts) {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
 
-  // Write JSON
-  fs.writeFileSync(JSON_DB_FILE, JSON.stringify(accounts, null, 2));
+    // Write JSON
+    fs.writeFileSync(JSON_DB_FILE, JSON.stringify(accounts, null, 2));
 
-  // Write Excel spreadsheet — flatten history into rows for readability
-  const excelData = [];
-  accounts.forEach(acc => {
-    if (acc.history && acc.history.length > 0) {
-      acc.history.forEach(h => {
+    // Write Excel spreadsheet — flatten history into rows for readability
+    const excelData = [];
+    accounts.forEach(acc => {
+      if (acc.history && acc.history.length > 0) {
+        acc.history.forEach(h => {
+          excelData.push({
+            'ID': acc.id,
+            'Account No': acc.account,
+            'Consumer Name': acc.name,
+            'Room No': acc.roomNo || '',
+            'Address': acc.address,
+            'Meter No': acc.meterNo,
+            'Tariff': acc.tariff,
+            'Sanctioned Load': acc.sanctionedLoad,
+            'Bill Month': h.billMonth,
+            'Units (kWh)': h.units,
+            'Amount (Rs)': h.amount,
+            'Due Date': h.dueDate,
+            'Status': h.status,
+          });
+        });
+      } else {
         excelData.push({
           'ID': acc.id,
           'Account No': acc.account,
@@ -132,37 +183,23 @@ function saveBillsDatabase(accounts) {
           'Meter No': acc.meterNo,
           'Tariff': acc.tariff,
           'Sanctioned Load': acc.sanctionedLoad,
-          'Bill Month': h.billMonth,
-          'Units (kWh)': h.units,
-          'Amount (Rs)': h.amount,
-          'Due Date': h.dueDate,
-          'Status': h.status,
+          'Bill Month': '',
+          'Units (kWh)': '',
+          'Amount (Rs)': '',
+          'Due Date': '',
+          'Status': '',
         });
-      });
-    } else {
-      excelData.push({
-        'ID': acc.id,
-        'Account No': acc.account,
-        'Consumer Name': acc.name,
-        'Room No': acc.roomNo || '',
-        'Address': acc.address,
-        'Meter No': acc.meterNo,
-        'Tariff': acc.tariff,
-        'Sanctioned Load': acc.sanctionedLoad,
-        'Bill Month': '',
-        'Units (kWh)': '',
-        'Amount (Rs)': '',
-        'Due Date': '',
-        'Status': '',
-      });
-    }
-  });
+      }
+    });
 
-  const worksheet = XLSX.utils.json_to_sheet(excelData);
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'MESCOM Bills');
-  XLSX.writeFile(workbook, XLSX_DB_FILE);
-  console.log(`Spreadsheet database synced: ${accounts.length} accounts saved to ${XLSX_DB_FILE}`);
+    const worksheet = XLSX.utils.json_to_sheet(excelData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'MESCOM Bills');
+    XLSX.writeFile(workbook, XLSX_DB_FILE);
+    logInfo('DB', `Database saved successfully`, { accounts: accounts.length, jsonFile: JSON_DB_FILE, xlsxFile: XLSX_DB_FILE });
+  } catch (err) {
+    logError('DB', 'Error saving database', err);
+  }
 }
 
 let scraperSessions = {}; // Store active browser/page sessions
@@ -172,6 +209,7 @@ let scraperSessions = {}; // Store active browser/page sessions
 // 1. Get all accounts
 app.get('/api/bills', (req, res) => {
   const accounts = loadBillsDatabase();
+  logInfo('API', `Fetched ${accounts.length} accounts from database`);
   res.json(accounts);
 });
 
@@ -206,8 +244,10 @@ app.put('/api/bills/:id', (req, res) => {
     }
 
     saveBillsDatabase(accounts);
+    logInfo('API', `Updated account ID ${id}`, { account: accounts[idx].account, name: accounts[idx].name });
     res.json({ success: true, account: accounts[idx] });
   } else {
+    logWarn('API', `Failed to update: Account ID ${id} not found`);
     res.status(404).json({ error: 'Account not found' });
   }
 });
@@ -216,6 +256,7 @@ app.put('/api/bills/:id', (req, res) => {
 app.post('/api/bills', (req, res) => {
   const { account, name, roomNo, meterNo, billMonth, units, amount, dueDate, status } = req.body;
   if (!account) {
+    logWarn('API', 'Account creation failed: Account number is required');
     return res.status(400).json({ error: 'Account number is required' });
   }
 
@@ -226,6 +267,7 @@ app.post('/api/bills', (req, res) => {
   // Check if account already exists
   const existing = accounts.find(a => a.account.replace(/^MNG-/, '') === cleanAcc);
   if (existing) {
+    logWarn('API', `Account creation skipped: Account ${normalizedAcc} already exists`);
     return res.status(409).json({ error: 'Account already exists', account: existing });
   }
 
@@ -256,6 +298,7 @@ app.post('/api/bills', (req, res) => {
 
   accounts.push(newAccount);
   saveBillsDatabase(accounts);
+  logInfo('API', `Created new account ID ${newId}`, { account: normalizedAcc, name: newAccount.name });
   res.json({ success: true, account: newAccount });
 });
 
@@ -268,8 +311,10 @@ app.delete('/api/bills/:id', (req, res) => {
   if (idx !== -1) {
     const deleted = accounts.splice(idx, 1);
     saveBillsDatabase(accounts);
+    logInfo('API', `Deleted account ID ${id}`, { account: deleted[0].account });
     res.json({ success: true, deleted: deleted[0] });
   } else {
+    logWarn('API', `Delete failed: Account ID ${id} not found`);
     res.status(404).json({ error: 'Account not found' });
   }
 });
@@ -283,8 +328,10 @@ app.delete('/api/bills/:id/history', (req, res) => {
   if (idx !== -1) {
     accounts[idx].history = [];
     saveBillsDatabase(accounts);
+    logInfo('API', `Cleared bill history for account ID ${id}`, { account: accounts[idx].account });
     res.json({ success: true, account: accounts[idx] });
   } else {
+    logWarn('API', `Clear history failed: Account ID ${id} not found`);
     res.status(404).json({ error: 'Account not found' });
   }
 });
@@ -315,6 +362,7 @@ app.post('/api/bills/save-sync', (req, res) => {
       history: []
     });
     accIdx = accounts.length - 1;
+    logInfo('API', `Auto-created account for live sync: ${normalizedAcc}`);
   }
 
   const acc = accounts[accIdx];
@@ -332,6 +380,7 @@ app.post('/api/bills/save-sync', (req, res) => {
   if (histIdx !== -1) {
     // Update existing month
     acc.history[histIdx] = { billMonth, units, amount, dueDate, status: resolvedStatus };
+    logInfo('API', `Updated existing history entry for ${normalizedAcc} (${billMonth})`, { amount, units, status: resolvedStatus });
   } else {
     // Add new month entry
     acc.history.unshift({ billMonth, units, amount, dueDate, status: resolvedStatus });
@@ -341,6 +390,7 @@ app.post('/api/bills/save-sync', (req, res) => {
     if (acc.history.length > MAX_HISTORY) {
       acc.history = acc.history.slice(0, MAX_HISTORY);
     }
+    logInfo('API', `Added new history entry for ${normalizedAcc} (${billMonth})`, { amount, units, status: resolvedStatus });
   }
 
   saveBillsDatabase(accounts);
@@ -350,7 +400,7 @@ app.post('/api/bills/save-sync', (req, res) => {
 // Endpoint 6: Initialize session, navigate, and return CAPTCHA image
 app.post('/api/scraper/init', async (req, res) => {
   const sessionId = 'session_' + Date.now();
-  console.log(`Initializing scraper session: ${sessionId}`);
+  logInfo('SCRAPER', `Initializing new scraper session`, { sessionId });
 
   try {
     const browser = await puppeteer.launch({
@@ -390,17 +440,17 @@ app.post('/api/scraper/init', async (req, res) => {
         waitUntil: 'domcontentloaded',
         timeout: 30000
       });
-      console.log(`[${sessionId}] Navigation completed.`);
+      logInfo('SCRAPER', `[${sessionId}] Navigation to MESCOM quick-payment completed`);
     } catch (e) {
-      console.log(`[${sessionId}] Page navigation handled: ${e.message}`);
+      logWarn('SCRAPER', `[${sessionId}] Navigation load event warning (proceeding): ${e.message}`);
     }
 
     // Wait for Angular to bootstrap and render the canvas
     try {
       await page.waitForSelector('canvas#captcha', { timeout: 20000 });
-      console.log(`[${sessionId}] Canvas found.`);
+      logInfo('SCRAPER', `[${sessionId}] CAPTCHA canvas element rendered in DOM`);
     } catch (e) {
-      console.log(`[${sessionId}] Canvas selector timed out: ${e.message}`);
+      logWarn('SCRAPER', `[${sessionId}] CAPTCHA canvas selector timeout: ${e.message}`);
     }
 
     // Brief safety wait for canvas to fully render
@@ -414,6 +464,7 @@ app.post('/api/scraper/init', async (req, res) => {
 
     if (!captchaDataUrl) {
       await browser.close();
+      logError('SCRAPER', `[${sessionId}] Failed to extract CAPTCHA canvas data URL`);
       return res.status(500).json({ error: 'Failed to extract CAPTCHA from page canvas. The portal might be slow. Please try again.' });
     }
 
@@ -421,6 +472,8 @@ app.post('/api/scraper/init', async (req, res) => {
     const leakedCode = await page.evaluate(() => {
       return window.code || (typeof code !== 'undefined' ? code : null);
     });
+
+    logInfo('SCRAPER', `[${sessionId}] Session ready`, { autoSolvedCode: leakedCode ? leakedCode : 'None (manual entry required)' });
 
     scraperSessions[sessionId] = { browser, page, leakedCode, createdAt: Date.now() };
 
@@ -431,7 +484,7 @@ app.post('/api/scraper/init', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Session initialization error:', err);
+    logError('SCRAPER', `[${sessionId}] Session initialization error`, err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -439,10 +492,11 @@ app.post('/api/scraper/init', async (req, res) => {
 // Endpoint 7: Submit Account No + Captcha Text and parse result
 app.post('/api/scraper/submit', async (req, res) => {
   const { sessionId, accountNo, captchaCode } = req.body;
-  console.log(`Submitting form for session: ${sessionId}, account: ${accountNo}`);
+  logInfo('SCRAPER', `Form submission requested`, { sessionId, accountNo });
 
   const session = scraperSessions[sessionId];
   if (!session) {
+    logWarn('SCRAPER', `Session expired or not found`, { sessionId });
     return res.status(400).json({ error: 'Scraper session expired or not found. Please refresh.' });
   }
 
@@ -450,6 +504,7 @@ app.post('/api/scraper/submit', async (req, res) => {
 
   try {
     const targetCode = captchaCode === 'AUTO' && session.leakedCode ? session.leakedCode : captchaCode;
+    logInfo('SCRAPER', `Filling account and CAPTCHA code`, { sessionId, accountNo, captchaUsed: targetCode });
 
     // Fill form
     await page.evaluate(() => {
@@ -478,6 +533,7 @@ app.post('/api/scraper/submit', async (req, res) => {
     });
 
     if (captchaError) {
+      logWarn('SCRAPER', `[${sessionId}] CAPTCHA verification error reported by portal`, { captchaError });
       const newCaptcha = await page.evaluate(async () => {
         const loopBtn = [...document.querySelectorAll('a')].find(el => el.onclick && el.onclick.toString().includes('createCaptcha'));
         if (loopBtn) {
@@ -581,13 +637,21 @@ app.post('/api/scraper/submit', async (req, res) => {
     await browser.close();
     delete scraperSessions[sessionId];
 
+    logInfo('SCRAPER', `[${sessionId}] Bill scrape completed successfully`, {
+      accountNo,
+      consumerName: result.consumerName,
+      amount: result.billAmount,
+      units: result.unitsConsumed,
+      month: result.billingMonth
+    });
+
     res.json({
       success: true,
       data: result
     });
 
   } catch (err) {
-    console.error('Submission processing error:', err);
+    logError('SCRAPER', `[${sessionId}] Form submission processing error`, err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -597,10 +661,12 @@ setInterval(() => {
   const now = Date.now();
   Object.keys(scraperSessions).forEach(async (id) => {
     if (now - scraperSessions[id].createdAt > 10 * 60 * 1000) {
-      console.log(`Cleaning up expired session: ${id}`);
+      logInfo('SCRAPER', `Cleaning up expired session: ${id}`);
       try {
         await scraperSessions[id].browser.close();
-      } catch (e) {}
+      } catch (e) {
+        logError('SCRAPER', `Error closing browser for expired session ${id}`, e);
+      }
       delete scraperSessions[id];
     }
   });
@@ -608,5 +674,8 @@ setInterval(() => {
 
 const PORT = 35000;
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  logInfo('SERVER', `MESCOM Dashboard Server listening on port ${PORT}`, {
+    env: process.env.NODE_ENV || 'development',
+    puppeteerPath: process.env.PUPPETEER_EXECUTABLE_PATH || 'system default'
+  });
 });
