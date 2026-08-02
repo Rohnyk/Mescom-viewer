@@ -188,8 +188,19 @@ function renderPagination() {
 }
 
 // ---------- Charts ----------
+function getActiveBills() {
+  if (activeProfileId === "all") return BILLS;
+  const profiles = loadProfiles();
+  const p = profiles.find(pr => pr.id === activeProfileId);
+  if (!p) return BILLS;
+  return BILLS.filter(b => isAccInProfile(p, b.account));
+}
+
 function renderCharts() {
-  renderConsumptionChart();
+  populateAccountFilter();
+  const filterSel = document.getElementById("consumption-filter");
+  const selectedAcc = filterSel ? filterSel.value : "all";
+  renderConsumptionChart(selectedAcc);
   renderCostChart();
 }
 
@@ -204,11 +215,15 @@ function getChartColors() {
 function renderConsumptionChart(accountFilter = "all") {
   const ctx = document.getElementById("chart-consumption").getContext("2d");
   const colors = getChartColors();
-  const accounts = accountFilter === "all" ? BILLS : BILLS.filter(a => a.account === accountFilter);
+  const activeBills = getActiveBills();
 
-  // Get sorted unique months from history of all accounts
+  const accounts = accountFilter === "all" 
+    ? activeBills 
+    : activeBills.filter(a => matchAcc(a.account, accountFilter));
+
+  // Get sorted unique months from history of active profile's accounts
   const monthSet = new Set();
-  BILLS.forEach(a => {
+  activeBills.forEach(a => {
     if (a.history) {
       a.history.forEach(h => monthSet.add(h.billMonth));
     }
@@ -273,7 +288,7 @@ function renderConsumptionChart(accountFilter = "all") {
 function renderCostChart() {
   const ctx = document.getElementById("chart-cost").getContext("2d");
   const colors = getChartColors();
-  const accounts = BILLS;
+  const accounts = getActiveBills();
 
   const data = accounts.map(acc => {
     if (!acc.history) return 0;
@@ -371,11 +386,13 @@ function filterByStatus(status) {
 // ---------- Account filter for chart ----------
 function populateAccountFilter() {
   const sel = document.getElementById("consumption-filter");
-  sel.innerHTML = '<option value="all">All Accounts</option>';
-  uniqueAccounts().forEach((name, acc) => {
+  if (!sel) return;
+  const activeBills = getActiveBills();
+  sel.innerHTML = '<option value="all">All Profile Accounts</option>';
+  activeBills.forEach(b => {
     const opt = document.createElement("option");
-    opt.value = acc;
-    opt.textContent = `${name} (${acc})`;
+    opt.value = b.account;
+    opt.textContent = `${b.name} (${b.account})`;
     sel.appendChild(opt);
   });
 }
@@ -501,14 +518,10 @@ function switchProfile(profileId) {
   renderProfileBanner();
   applyFilters();
 
-  const accounts = getProfileAccounts(profileId);
-  if (accounts && accounts.length === 1) {
-    renderConsumptionChart(accounts[0]);
-    document.getElementById("consumption-filter").value = accounts[0];
-  } else {
-    renderConsumptionChart("all");
-    document.getElementById("consumption-filter").value = "all";
-  }
+  populateAccountFilter();
+  const filterSel = document.getElementById("consumption-filter");
+  if (filterSel) filterSel.value = "all";
+  renderCharts();
 }
 
 // --- Manage Profiles Modal ---
