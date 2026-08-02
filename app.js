@@ -1274,7 +1274,31 @@ async function importScrapedBill(accountNo, scraped, targetBillId = null) {
     });
 
     if (res.ok) {
+      // Auto-assign account to currently selected profile if a specific profile tab is active
+      if (activeProfileId !== "all") {
+        const profiles = loadProfiles();
+        const existingAssignedProfile = profiles.find(p => p.accounts && p.accounts.some(a => matchAcc(a, normalizedAcc)));
+        
+        // Auto-assign if not already assigned to any profile
+        if (!existingAssignedProfile) {
+          const target = profiles.find(p => p.id === activeProfileId);
+          if (target) {
+            if (!target.accounts) target.accounts = [];
+            if (!target.accounts.some(a => matchAcc(a, normalizedAcc))) {
+              target.accounts.push(normalizedAcc);
+              saveProfiles(profiles);
+            }
+          }
+        }
+      }
+
       await loadBillsFromServer();
+      renderProfileTabs();
+      if (activeProfileId !== "all") {
+        renderProfileBanner();
+      }
+      applyFilters();
+      renderCharts();
     }
   } catch (err) {
     console.error("Failed to save scraped bill:", err);
