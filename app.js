@@ -1158,43 +1158,65 @@ async function refetchAllAccounts() {
 
   let successCount = 0;
   let failCount = 0;
+  let completedCount = 0;
 
-  for (let i = 0; i < accounts.length; i++) {
-    const acc = accounts[i];
-    const cleanAcc = acc.replace(/^MNG-/, '');
-    
-    document.getElementById("fetch-loading-text").textContent = `Syncing account ${i + 1} of ${accounts.length} (${acc})...`;
+  const CONCURRENCY = 3; // 3 parallel browser workers
+  let currentIndex = 0;
 
-    try {
-      const initRes = await fetch('/api/scraper/init', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountNo: cleanAcc })
-      });
-      if (!initRes.ok) throw new Error("Init session failed");
-      const initData = await initRes.json();
-      
-      const submitRes = await fetch('/api/scraper/submit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId: initData.sessionId,
-          accountNo: cleanAcc,
-          captchaCode: 'AUTO'
-        })
-      });
-      if (!submitRes.ok) throw new Error("Submit verification failed");
-      const submitData = await submitRes.json();
+  const updateProgress = () => {
+    document.getElementById("fetch-loading-text").textContent = 
+      `Syncing in parallel (3x Speed)... Completed ${completedCount} of ${accounts.length} (Succeeded: ${successCount}, Failed: ${failCount})`;
+  };
 
-      await importScrapedBill(cleanAcc, submitData.data);
-      successCount++;
-    } catch (e) {
-      console.error(`Failed to refetch account ${acc}:`, e);
-      failCount++;
+  updateProgress();
+
+  async function worker() {
+    while (currentIndex < accounts.length) {
+      const idx = currentIndex++;
+      const acc = accounts[idx];
+      const cleanAcc = acc.replace(/^MNG-/, '');
+
+      try {
+        const initRes = await fetch('/api/scraper/init', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accountNo: cleanAcc })
+        });
+        if (!initRes.ok) throw new Error("Init session failed");
+        const initData = await initRes.json();
+        
+        const submitRes = await fetch('/api/scraper/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: initData.sessionId,
+            accountNo: cleanAcc,
+            captchaCode: 'AUTO'
+          })
+        });
+        if (!submitRes.ok) throw new Error("Submit verification failed");
+        const submitData = await submitRes.json();
+
+        await importScrapedBill(cleanAcc, submitData.data);
+        successCount++;
+      } catch (e) {
+        console.error(`Failed to refetch account ${acc}:`, e);
+        failCount++;
+      } finally {
+        completedCount++;
+        updateProgress();
+      }
     }
-
-    await new Promise(r => setTimeout(r, 1000));
   }
+
+  // Launch parallel workers
+  const workerTasks = [];
+  const activeWorkers = Math.min(CONCURRENCY, accounts.length);
+  for (let i = 0; i < activeWorkers; i++) {
+    workerTasks.push(worker());
+  }
+
+  await Promise.all(workerTasks);
 
   document.getElementById("fetch-loading-text").textContent = `Sync Complete! Succeeded: ${successCount}, Failed: ${failCount}`;
   document.getElementById("fetch-bill-close").style.display = "block";
