@@ -14,6 +14,17 @@ let consumptionChart = null;
 let costChart = null;
 
 // ---------- Helpers ----------
+function parseBillAmount(val) {
+  if (typeof val === 'number') return Math.round(val);
+  if (!val) return 0;
+  const str = String(val).trim();
+  const isNegative = str.includes('-') || /cr/i.test(str) || /^\(.*\)$/.test(str);
+  const numericStr = str.replace(/[^0-9.]/g, '');
+  const parsed = parseFloat(numericStr) || 0;
+  const rounded = Math.round(parsed);
+  return isNegative ? -Math.abs(rounded) : rounded;
+}
+
 function formatMonth(ym) {
   if (!ym || ym === 'N/A') return 'N/A';
   const parts = ym.split("-");
@@ -24,6 +35,10 @@ function formatMonth(ym) {
 }
 
 function formatCurrency(n) {
+  if (typeof n !== 'number' || isNaN(n)) n = 0;
+  if (n < 0) {
+    return "-₹" + Math.abs(n).toLocaleString("en-IN");
+  }
   return "₹" + n.toLocaleString("en-IN");
 }
 
@@ -88,67 +103,83 @@ function animateValue(id, end, isCurrency = false, suffix = "") {
 }
 
 // ---------- Table ----------
+function renderBillRowHtml(b) {
+  const isSyncing = localSyncingBillIds.has(b.id);
+  const isChecked = selectedBillIds.has(b.id);
+  const latest = getLatestBill(b);
+  
+  const statusCell = isSyncing ?
+    `<td>
+       <div style="display:flex; align-items:center; gap:6px;">
+         <span style="display:inline-block; width:12px; height:12px; border:2px solid var(--accent-green); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite;"></span>
+         <span style="font-size:11px; color:#10b981; font-weight:500;">Syncing...</span>
+       </div>
+     </td>` :
+    `<td><span class="badge badge-${latest ? latest.status : 'none'}">${latest ? capitalize(latest.status) : 'No Bill'}</span></td>`;
+
+  const actionsCell = isSyncing ?
+    `<td>
+       <div class="row-actions" style="opacity:0.4; pointer-events:none;">
+         <button class="btn-action btn-action-view" disabled>&times;</button>
+       </div>
+     </td>` :
+    `<td>
+      <div class="row-actions">
+        <button class="btn-action btn-action-view" onclick="openModal(${b.id})" title="View Details & History">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+        <button class="btn-action btn-action-view" onclick="triggerRefetch(${b.id}, '${b.account}')" title="Refetch Live Bill" style="color: var(--accent-green);">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 11-.57-8.38l5.67-5.67"/></svg>
+        </button>
+        <button class="btn-action btn-action-edit" onclick="openBillForm(${b.id})" title="Edit Account">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </button>
+        <button class="btn-action btn-action-delete" onclick="confirmDeleteHistory(${b.id})" title="Clear History" style="color: var(--accent-orange);">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/><path d="M19 19l-4-4"/></svg>
+        </button>
+        <button class="btn-action btn-action-delete" onclick="confirmDeleteBill(${b.id})" title="Delete Account">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+        </button>
+      </div>
+    </td>`;
+
+  return `
+    <tr id="bill-row-${b.id}" class="${isSyncing ? 'row-syncing' : ''}">
+      <td style="text-align:center;">
+        <input type="checkbox" class="bill-checkbox" data-id="${b.id}" onchange="handleBillSelect(this)" ${isChecked ? 'checked' : ''} style="cursor:pointer;" />
+      </td>
+      <td style="font-weight:600;color:var(--accent-blue)">${b.account}</td>
+      <td>${b.name}</td>
+      <td>${b.roomNo || 'N/A'}</td>
+      <td style="font-family:monospace;font-weight:500;">${b.meterNo || 'N/A'}</td>
+      <td style="font-weight:600">${latest ? formatCurrency(latest.amount) : '₹0'}</td>
+      <td>${latest ? formatDueDate(latest.dueDate) : 'N/A'}</td>
+      ${statusCell}
+      ${actionsCell}
+    </tr>
+  `;
+}
+
+function updateSingleBillRow(billId) {
+  const rowEl = document.getElementById(`bill-row-${billId}`);
+  if (!rowEl) return;
+  const b = BILLS.find(item => item.id === billId);
+  if (!b) return;
+
+  const tempTbody = document.createElement("tbody");
+  tempTbody.innerHTML = renderBillRowHtml(b);
+  const newRow = tempTbody.firstElementChild;
+  if (newRow) {
+    rowEl.replaceWith(newRow);
+  }
+}
+
 function renderTable() {
   const tbody = document.getElementById("bills-tbody");
   const startIdx = (currentPage - 1) * PAGE_SIZE;
   const pageBills = filteredBills.slice(startIdx, startIdx + PAGE_SIZE);
 
-  tbody.innerHTML = pageBills.map(b => {
-    const isSyncing = localSyncingBillIds.has(b.id);
-    const isChecked = selectedBillIds.has(b.id);
-    const latest = getLatestBill(b);
-    
-    const statusCell = isSyncing ?
-      `<td>
-         <div style="display:flex; align-items:center; gap:6px;">
-           <span style="display:inline-block; width:12px; height:12px; border:2px solid var(--accent-green); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite;"></span>
-           <span style="font-size:11px; color:#10b981; font-weight:500;">Syncing...</span>
-         </div>
-       </td>` :
-      `<td><span class="badge badge-${latest ? latest.status : 'none'}">${latest ? capitalize(latest.status) : 'No Bill'}</span></td>`;
-
-    const actionsCell = isSyncing ?
-      `<td>
-         <div class="row-actions" style="opacity:0.4; pointer-events:none;">
-           <button class="btn-action btn-action-view" disabled>&times;</button>
-         </div>
-       </td>` :
-      `<td>
-        <div class="row-actions">
-          <button class="btn-action btn-action-view" onclick="openModal(${b.id})" title="View Details & History">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-          </button>
-          <button class="btn-action btn-action-view" onclick="triggerRefetch(${b.id}, '${b.account}')" title="Refetch Live Bill" style="color: var(--accent-green);">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 11-.57-8.38l5.67-5.67"/></svg>
-          </button>
-          <button class="btn-action btn-action-edit" onclick="openBillForm(${b.id})" title="Edit Account">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-          </button>
-          <button class="btn-action btn-action-delete" onclick="confirmDeleteHistory(${b.id})" title="Clear History" style="color: var(--accent-orange);">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/><path d="M19 19l-4-4"/></svg>
-          </button>
-          <button class="btn-action btn-action-delete" onclick="confirmDeleteBill(${b.id})" title="Delete Account">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-          </button>
-        </div>
-      </td>`;
-
-    return `
-      <tr class="${isSyncing ? 'row-syncing' : ''}">
-        <td style="text-align:center;">
-          <input type="checkbox" class="bill-checkbox" data-id="${b.id}" onchange="handleBillSelect(this)" ${isChecked ? 'checked' : ''} style="cursor:pointer;" />
-        </td>
-        <td style="font-weight:600;color:var(--accent-blue)">${b.account}</td>
-        <td>${b.name}</td>
-        <td>${b.roomNo || 'N/A'}</td>
-        <td style="font-family:monospace;font-weight:500;">${b.meterNo || 'N/A'}</td>
-        <td style="font-weight:600">${latest ? formatCurrency(latest.amount) : '₹0'}</td>
-        <td>${latest ? formatDueDate(latest.dueDate) : 'N/A'}</td>
-        ${statusCell}
-        ${actionsCell}
-      </tr>
-    `;
-  }).join("");
+  tbody.innerHTML = pageBills.map(b => renderBillRowHtml(b)).join("");
 
   // Update header checkbox state
   const selectAllCheckbox = document.getElementById("select-all-bills");
@@ -314,8 +345,8 @@ function renderCostChart() {
   const accounts = getActiveBills();
 
   const data = accounts.map(acc => {
-    if (!acc.history) return 0;
-    return acc.history.reduce((s, h) => s + h.amount, 0);
+    const latest = getLatestBill(acc);
+    return latest ? latest.amount : 0;
   });
 
   const bgColors = accounts.map((_, idx) => getAccountColor(idx).border);
@@ -356,7 +387,7 @@ function renderCostChart() {
 }
 
 // ---------- Filters ----------
-function applyFilters() {
+function applyFilters(resetPage = false) {
   const search = document.getElementById("search-input").value.toLowerCase().trim();
   const statusFilter = document.getElementById("status-filter").value;
   const sortFilter = document.getElementById("sort-filter").value;
@@ -394,7 +425,13 @@ function applyFilters() {
     }
   });
 
-  currentPage = 1;
+  const totalPages = Math.ceil(filteredBills.length / PAGE_SIZE) || 1;
+  if (resetPage) {
+    currentPage = 1;
+  } else {
+    currentPage = Math.max(1, Math.min(currentPage, totalPages));
+  }
+
   renderSummary();
   renderTable();
 }
@@ -403,7 +440,7 @@ function filterByStatus(status) {
   document.getElementById("status-filter").value = status;
   const pills = document.querySelectorAll(".status-pill");
   pills.forEach(p => p.classList.toggle("active", p.dataset.status === status));
-  applyFilters();
+  applyFilters(true);
 }
 
 // ---------- Account filter for chart ----------
@@ -539,7 +576,7 @@ function switchProfile(profileId) {
   activeProfileId = profileId;
   renderProfileTabs();
   renderProfileBanner();
-  applyFilters();
+  applyFilters(true);
 
   populateAccountFilter();
   const filterSel = document.getElementById("consumption-filter");
@@ -824,9 +861,10 @@ function openBillForm(editId) {
   document.getElementById("bf-name").value = acc.name || '';
   document.getElementById("bf-month").value = latest ? latest.billMonth : '';
   document.getElementById("bf-units").value = latest ? latest.units : '';
+  const latestAmount = latest ? parseBillAmount(latest.amount) : 0;
   document.getElementById("bf-amount").value = latest ? latest.amount : '';
   document.getElementById("bf-due").value = latest ? latest.dueDate : '';
-  document.getElementById("bf-status").value = latest ? latest.status : 'unpaid';
+  document.getElementById("bf-status").value = latestAmount <= 0 ? 'paid' : (latest ? latest.status : 'unpaid');
   document.getElementById("bf-meter").value = acc.meterNo || '';
   document.getElementById("bf-room").value = acc.roomNo || '';
 
@@ -974,9 +1012,10 @@ async function saveBill(e) {
   const name = document.getElementById("bf-name").value.trim();
   const billMonth = document.getElementById("bf-month").value;
   const units = parseInt(document.getElementById("bf-units").value, 10) || 0;
-  const amount = parseInt(document.getElementById("bf-amount").value, 10) || 0;
+  const amount = parseBillAmount(document.getElementById("bf-amount").value);
   const dueDate = document.getElementById("bf-due").value;
-  const status = document.getElementById("bf-status").value;
+  const rawStatus = document.getElementById("bf-status").value;
+  const status = amount <= 0 ? "paid" : rawStatus;
   const meterNo = document.getElementById("bf-meter").value.trim();
   const roomNo = document.getElementById("bf-room").value.trim();
   const selectedProfileId = document.getElementById("bf-profile").value;
@@ -1102,7 +1141,7 @@ let currentScraperSessionId = null;
 async function triggerRefetch(billId, accountNo) {
   const cleanAcc = accountNo.replace(/^MNG-/, '');
   localSyncingBillIds.add(billId);
-  renderTable();
+  updateSingleBillRow(billId);
 
   try {
     const initRes = await fetch('/api/scraper/init', {
@@ -1131,7 +1170,7 @@ async function triggerRefetch(billId, accountNo) {
     alert(`Failed to sync account ${accountNo}: ${err.message}`);
   } finally {
     localSyncingBillIds.delete(billId);
-    renderTable();
+    updateSingleBillRow(billId);
   }
 }
 
@@ -1145,8 +1184,16 @@ function openFetchBillModal() {
 }
 
 async function refetchAllAccounts() {
-  const accounts = [...uniqueAccounts().keys()];
-  if (accounts.length === 0) {
+  // If user has specific bills selected with checkboxes, refetch selected accounts; otherwise refetch all accounts
+  let targetAccountNos = [];
+  if (selectedBillIds.size > 0) {
+    const selectedBills = BILLS.filter(b => selectedBillIds.has(b.id));
+    targetAccountNos = [...new Set(selectedBills.map(b => b.account))];
+  } else {
+    targetAccountNos = [...uniqueAccounts().keys()];
+  }
+
+  if (targetAccountNos.length === 0) {
     alert("No accounts available to refetch.");
     return;
   }
@@ -1165,18 +1212,21 @@ async function refetchAllAccounts() {
 
   const updateProgress = () => {
     document.getElementById("fetch-loading-text").textContent = 
-      `Syncing in parallel (3x Speed)... Completed ${completedCount} of ${accounts.length} (Succeeded: ${successCount}, Failed: ${failCount})`;
+      `Syncing in parallel (3x Speed)... Completed ${completedCount} of ${targetAccountNos.length} (Succeeded: ${successCount}, Failed: ${failCount})`;
   };
 
   updateProgress();
 
-  async function worker() {
-    while (currentIndex < accounts.length) {
-      const idx = currentIndex++;
-      const acc = accounts[idx];
-      const cleanAcc = acc.replace(/^MNG-/, '');
+  async function fetchWithRetry(acc, maxRetries = 2) {
+    const cleanAcc = acc.replace(/^MNG-/, '');
+    let lastError = null;
 
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
+        if (attempt > 0) {
+          await new Promise(r => setTimeout(r, 1500));
+        }
+
         const initRes = await fetch('/api/scraper/init', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1194,13 +1244,32 @@ async function refetchAllAccounts() {
             captchaCode: 'AUTO'
           })
         });
-        if (!submitRes.ok) throw new Error("Submit verification failed");
+        if (!submitRes.ok) {
+          const errBody = await submitRes.json().catch(() => ({}));
+          throw new Error(errBody.error || "Verification failed");
+        }
         const submitData = await submitRes.json();
 
         await importScrapedBill(cleanAcc, submitData.data);
+        return true;
+      } catch (err) {
+        lastError = err;
+        console.warn(`[Refetch All] Attempt ${attempt + 1}/${maxRetries + 1} failed for ${acc}:`, err.message);
+      }
+    }
+    throw lastError;
+  }
+
+  async function worker() {
+    while (currentIndex < targetAccountNos.length) {
+      const idx = currentIndex++;
+      const acc = targetAccountNos[idx];
+
+      try {
+        await fetchWithRetry(acc, 2);
         successCount++;
       } catch (e) {
-        console.error(`Failed to refetch account ${acc}:`, e);
+        console.error(`[Refetch All] Account ${acc} failed after retries:`, e);
         failCount++;
       } finally {
         completedCount++;
@@ -1211,7 +1280,7 @@ async function refetchAllAccounts() {
 
   // Launch parallel workers
   const workerTasks = [];
-  const activeWorkers = Math.min(CONCURRENCY, accounts.length);
+  const activeWorkers = Math.min(CONCURRENCY, targetAccountNos.length);
   for (let i = 0; i < activeWorkers; i++) {
     workerTasks.push(worker());
   }
@@ -1344,7 +1413,7 @@ async function submitScraperForm() {
 
 async function importScrapedBill(accountNo, scraped, targetBillId = null) {
   // Convert scraped amount and units
-  const amount = parseInt(scraped.billAmount.replace(/[^0-9]/g, ''), 10) || 0;
+  const amount = parseBillAmount(scraped.billAmount);
   
   // Estimate units if not returned (common in payment-only screens)
   let units = parseInt(scraped.unitsConsumed.replace(/[^0-9]/g, ''), 10) || 0;
@@ -1412,6 +1481,21 @@ async function importScrapedBill(accountNo, scraped, targetBillId = null) {
     });
 
     if (res.ok) {
+      const resData = await res.json();
+      if (resData.success && resData.account) {
+        const bIdx = BILLS.findIndex(b => matchAcc(b.account, normalizedAcc));
+        if (bIdx !== -1) {
+          BILLS[bIdx] = resData.account;
+        } else {
+          BILLS.push(resData.account);
+        }
+
+        const fIdx = filteredBills.findIndex(b => matchAcc(b.account, normalizedAcc));
+        if (fIdx !== -1) {
+          filteredBills[fIdx] = resData.account;
+        }
+      }
+
       // Auto-assign account to currently selected profile if a specific profile tab is active
       if (activeProfileId !== "all") {
         const profiles = loadProfiles();
@@ -1430,13 +1514,19 @@ async function importScrapedBill(accountNo, scraped, targetBillId = null) {
         }
       }
 
-      await loadBillsFromServer();
-      renderProfileTabs();
-      if (activeProfileId !== "all") {
-        renderProfileBanner();
+      if (targetBillId) {
+        renderSummary();
+        renderCharts();
+        updateSingleBillRow(targetBillId);
+      } else {
+        await loadBillsFromServer();
+        renderProfileTabs();
+        if (activeProfileId !== "all") {
+          renderProfileBanner();
+        }
+        applyFilters();
+        renderCharts();
       }
-      applyFilters();
-      renderCharts();
     }
   } catch (err) {
     console.error("Failed to save scraped bill:", err);
@@ -1444,8 +1534,8 @@ async function importScrapedBill(accountNo, scraped, targetBillId = null) {
 }
 
 // ---------- Event Listeners ----------
-document.getElementById("search-input").addEventListener("input", debounce(applyFilters, 250));
-document.getElementById("sort-filter").addEventListener("change", applyFilters);
+document.getElementById("search-input").addEventListener("input", debounce(() => applyFilters(true), 250));
+document.getElementById("sort-filter").addEventListener("change", () => applyFilters(true));
 document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
 document.getElementById("modal-close").addEventListener("click", closeModal);
 document.getElementById("modal-overlay").addEventListener("click", e => {
@@ -1495,6 +1585,16 @@ async function loadBillsFromServer() {
 function init() {
   initTheme();
   loadBillsFromServer();
+  const bfAmountEl = document.getElementById("bf-amount");
+  if (bfAmountEl) {
+    bfAmountEl.addEventListener("input", (e) => {
+      const val = parseBillAmount(e.target.value);
+      if (val <= 0) {
+        const statusEl = document.getElementById("bf-status");
+        if (statusEl) statusEl.value = "paid";
+      }
+    });
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);

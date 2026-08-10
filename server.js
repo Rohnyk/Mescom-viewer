@@ -121,6 +121,32 @@ const XLSX_DB_FILE = path.join(DATA_DIR, 'bills.xlsx');
 const MAX_HISTORY = 12;
 
 // --- Helper Functions to Load/Save Database ---
+function parseBillAmount(val) {
+  if (typeof val === 'number') return Math.round(val);
+  if (!val) return 0;
+  const str = String(val).trim();
+  const isNegative = str.includes('-') || /cr/i.test(str) || /^\(.*\)$/.test(str);
+  const numericStr = str.replace(/[^0-9.]/g, '');
+  const parsed = parseFloat(numericStr) || 0;
+  const rounded = Math.round(parsed);
+  return isNegative ? -Math.abs(rounded) : rounded;
+}
+
+function sanitizeAccounts(accounts) {
+  if (!Array.isArray(accounts)) return [];
+  accounts.forEach(acc => {
+    if (acc.history && Array.isArray(acc.history)) {
+      acc.history.forEach(h => {
+        h.amount = parseBillAmount(h.amount);
+        if (h.amount <= 0) {
+          h.status = "paid";
+        }
+      });
+    }
+  });
+  return accounts;
+}
+
 function loadBillsDatabase() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -131,7 +157,7 @@ function loadBillsDatabase() {
     try {
       const data = JSON.parse(fs.readFileSync(JSON_DB_FILE, 'utf8'));
       logInfo('DB', `Loaded bills database from ${JSON_DB_FILE}`, { accountCount: data.length });
-      return data;
+      return sanitizeAccounts(data);
     } catch (e) {
       logError('DB', `Failed to parse JSON DB at ${JSON_DB_FILE}, falling back to seeds`, e);
     }
@@ -139,8 +165,9 @@ function loadBillsDatabase() {
 
   // If no DB exists, initialize it with seed data
   logInfo('DB', 'No existing database found, initializing with seed data', { accountCount: SEED_ACCOUNTS.length });
-  saveBillsDatabase(SEED_ACCOUNTS);
-  return JSON.parse(JSON.stringify(SEED_ACCOUNTS));
+  const sanitizedSeed = sanitizeAccounts(JSON.parse(JSON.stringify(SEED_ACCOUNTS)));
+  saveBillsDatabase(sanitizedSeed);
+  return sanitizedSeed;
 }
 
 function saveBillsDatabase(accounts) {
@@ -581,12 +608,13 @@ app.put('/api/bills/:id', (req, res) => {
     if (updatedData.billMonth) {
       if (!accounts[idx].history) accounts[idx].history = [];
       const hIdx = accounts[idx].history.findIndex(h => h.billMonth === updatedData.billMonth);
+      const numAmount = parseBillAmount(updatedData.amount);
       const histItem = {
         billMonth: updatedData.billMonth,
         units: parseInt(updatedData.units, 10) || 0,
-        amount: parseInt(updatedData.amount, 10) || 0,
+        amount: numAmount,
         dueDate: updatedData.dueDate,
-        status: updatedData.status
+        status: numAmount <= 0 ? "paid" : updatedData.status
       };
       if (hIdx !== -1) {
         accounts[idx].history[hIdx] = histItem;
@@ -639,11 +667,12 @@ app.post('/api/bills', (req, res) => {
 
   // If bill details are provided, add an initial history entry
   if (billMonth) {
-    const resolvedStatus = (parseInt(amount, 10) <= 0) ? "paid" : (status || "unpaid");
+    const numAmount = parseBillAmount(amount);
+    const resolvedStatus = (numAmount <= 0) ? "paid" : (status || "unpaid");
     newAccount.history.push({
       billMonth,
       units: parseInt(units, 10) || 0,
-      amount: parseInt(amount, 10) || 0,
+      amount: numAmount,
       dueDate: dueDate || '',
       status: resolvedStatus
     });
@@ -739,24 +768,25 @@ app.post('/api/bills/save-sync', async (req, res) => {
     }
   }
 
-  const resolvedStatus = (parseInt(amount, 10) <= 0) ? "paid" : (status || "unpaid");
+  const numAmount = parseBillAmount(amount);
+  const resolvedStatus = (numAmount <= 0) ? "paid" : (status || "unpaid");
 
   // Check if this month already exists in history
   const histIdx = acc.history.findIndex(h => h.billMonth === billMonth);
   if (histIdx !== -1) {
     // Update existing month
-    acc.history[histIdx] = { billMonth, units, amount, dueDate, status: resolvedStatus };
-    logInfo('API', `Updated existing history entry for ${normalizedAcc} (${billMonth})`, { amount, units, status: resolvedStatus });
+    acc.history[histIdx] = { billMonth, units, amount: numAmount, dueDate, status: resolvedStatus };
+    logInfo('API', `Updated existing history entry for ${normalizedAcc} (${billMonth})`, { amount: numAmount, units, status: resolvedStatus });
   } else {
     // Add new month entry
-    acc.history.unshift({ billMonth, units, amount, dueDate, status: resolvedStatus });
+    acc.history.unshift({ billMonth, units, amount: numAmount, dueDate, status: resolvedStatus });
     // Sort history by month descending
     acc.history.sort((a, b) => b.billMonth.localeCompare(a.billMonth));
     // Cap at MAX_HISTORY
     if (acc.history.length > MAX_HISTORY) {
       acc.history = acc.history.slice(0, MAX_HISTORY);
     }
-    logInfo('API', `Added new history entry for ${normalizedAcc} (${billMonth})`, { amount, units, status: resolvedStatus });
+    logInfo('API', `Added new history entry for ${normalizedAcc} (${billMonth})`, { amount: numAmount, units, status: resolvedStatus });
   }
 
   saveBillsDatabase(accounts);
